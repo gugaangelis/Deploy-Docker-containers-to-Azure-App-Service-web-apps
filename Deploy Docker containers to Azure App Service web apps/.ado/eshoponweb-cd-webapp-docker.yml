@@ -1,0 +1,42 @@
+#NAME THE PIPELINE SAME AS FILE (WITHOUT ".yml")
+
+resources:
+  repositories:
+    - repository: self
+      trigger: none
+  pipelines:
+    - pipeline: ciPipeline
+      source: 'eshoponweb-ci-docker'
+      trigger:
+        branches:
+          include:
+            - main
+
+variables:
+  azureServiceConnection: 'azure subs'
+  resourceGroup: 'rg-devops'
+  location: 'westeurope'
+  subscriptionId: '5ff09da0-b756-47d9-b69d-a13e99e85ff3'
+
+stages:
+- stage: Deploy
+  jobs:
+  - job: Deploy
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: Deploy App Service using Bicep
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: $(azureServiceConnection)
+        subscriptionId: $(subscriptionId)
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(resourceGroup)'
+        location: '$(location)'
+        templateLocation: 'Linked artifact'
+        csmFile: '$(System.DefaultWorkingDirectory)/eShopOnWeb/infra/webapp-docker.bicep'
+        overrideParameters: '-location "swedencentral"'
+        deploymentMode: 'Incremental'

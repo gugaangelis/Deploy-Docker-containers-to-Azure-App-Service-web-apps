@@ -1,0 +1,92 @@
+# NAME THE PIPELINE SAME AS FILE (WITHOUT ".yml")
+
+resources:
+  repositories:
+    - repository: self
+      trigger: none
+
+variables:
+  azureServiceConnection: 'azure subs'
+  subscriptionId: '5ff09da0-b756-47d9-b69d-a13e99e85ff3'
+  resourceGroup: 'rg-devops'
+  location: 'westeurope'
+  # App ID (Client ID) da Service Principal do service connection acima.
+  # Necessário para conceder AcrPush ao ACR recém-criado (adminUserEnabled: false).
+  servicePrincipalAppId: '<preencher-com-app-id-da-sp>'
+
+stages:
+- stage: Build
+  jobs:
+  - job: Build
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+
+    - bash: |
+        echo "== Working directory =="
+        pwd
+        echo "== Procurando .bicep =="
+        find $(System.DefaultWorkingDirectory) -iname "*.bicep"
+        echo "== Listando raiz do repo =="
+        ls -la $(System.DefaultWorkingDirectory)
+      displayName: 'Debug - locate bicep files'
+
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: Deploy ACR using Bicep
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: $(azureServiceConnection)
+        subscriptionId: $(subscriptionId)
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(resourceGroup)'
+        location: '$(location)'
+        templateLocation: 'Linked artifact'
+        csmFile: '$(System.DefaultWorkingDirectory)/eShopOnWeb/infra/acr.bicep'
+        deploymentMode: 'Incremental'
+        deploymentOutputs: 'outputJson'
+
+    - task: PowerShell@2
+      displayName: Parse Bicep Output
+      inputs:
+        targetType: 'inline'
+        script: |
+          $var = $env:OUTPUTJSON | ConvertFrom-Json
+          $loginServer = $var.acrLoginServer.value
+          $acrName = $loginServer.Split('.')[0]
+          Write-Host "##vso[task.setvariable variable=acrLoginServer]$loginServer"
+          Write-Host "##vso[task.setvariable variable=acrName]$acrName"
+      env:
+        OUTPUTJSON: $(outputJson)
+
+    - task: AzureCLI@2
+      displayName: 'Grant AcrPush to Service Principal'
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          ACR_ID=$(az acr show --name "$(acrName)" --resource-group $(resourceGroup) --query id -o tsv)
+          az role assignment create \
+            --assignee "$(servicePrincipalAppId)" \
+            --role "AcrPush" \
+            --scope "$ACR_ID" \
+            --only-show-errors || echo "Role assignment já existe."
+          # Propagação de RBAC pode levar até alguns minutos
+          sleep 30
+
+    - task: AzureCLI@2
+      displayName: 'Build and push image via ACR Tasks'
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          az acr build \
+            --registry $(acrName) \
+            --image eshoponweb/web:$(Build.BuildId) \
+            --image eshoponweb/web:latest \
+            --file eShopOnWeb/src/Web/Dockerfile \
+            $(Build.SourcesDirectory)/eShopOnWeb
